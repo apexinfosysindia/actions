@@ -1,0 +1,175 @@
+name: "ApexOS version-push"
+description: >
+  Bump one or more component version keys in a channel file of the ApexOS
+  version repo and push the change. Authentication uses a write-access
+  deploy key so no PAT lifetime management is needed.
+
+inputs:
+  key:
+    description: >
+      Dot-path of the version-file key to update, e.g. "apexos" (all machine
+      variants), "supervisor", "plugin-cli". Use "apexos" to stamp every key
+      under the apexos object. Use "os.rpi4-64" for a single board.
+    required: true
+  version:
+    description: The version string to write.
+    required: true
+  channel:
+    description: "Channel file to update: dev | beta | stable"
+    required: true
+  cascade_to_beta:
+    description: >
+      When true (default for stable) also write the same version to beta.json.
+    required: false
+    default: "false"
+  deploy_key:
+    description: >
+      SSH private key with write access to the version repo.
+      Pass ${{ secrets.VERSION_PUSH_KEY }}.
+    required: true
+  version_repo:
+    description: "GitHub repo (owner/name) for the version file store."
+    required: false
+    default: "apexinfosysindia/version"
+  committer_name:
+    description: Git author name for the bump commit.
+    required: false
+    default: "ApexOS Bot"
+  committer_email:
+    description: Git author email for the bump commit.
+    required: false
+    default: "hello@apexinfosys.in"
+
+runs:
+  using: composite
+  steps:
+    - name: Configure SSH deploy key
+      shell: bash
+      env:
+        DEPLOY_KEY: ${{ inputs.deploy_key }}
+      run: |
+        SSHDIR="${HOME}/.ssh"
+        mkdir -p "$SSHDIR" && chmod 700 "$SSHDIR"
+        KEYFILE="${SSHDIR}/version-push-deploy-key"
+        printf '%s
+' "$DEPLOY_KEY" > "$KEYFILE"
+        chmod 600 "$KEYFILE"
+        # Override the github.com host entry so only this key is offered.
+        # Using a host alias avoids clobbering any existing github.com entry
+        # while still letting git clone the repo.
+        cat >> "${SSHDIR}/config" << EOF
+        Host version-repo-github
+          HostName github.com
+          User git
+          IdentityFile $KEYFILE
+          IdentitiesOnly yes
+          StrictHostKeyChecking accept-new
+        EOF
+        echo "SSH deploy key configured"
+
+    - name: Clone version repo
+      shell: bash
+      env:
+        VERSION_REPO: ${{ inputs.version_repo }}
+      run: |
+        CLONE_URL="git@version-repo-github:${VERSION_REPO}.git"
+        git clone --quiet --depth 1 "$CLONE_URL" /tmp/version-repo-push
+        cd /tmp/version-repo-push
+        git config user.name "${{ inputs.committer_name }}"
+        git config user.email "${{ inputs.committer_email }}"
+        echo "Cloned ${VERSION_REPO}"
+
+    - name: Update channel file
+      shell: python3 {0}
+      env:
+        KEY: ${{ inputs.key }}
+        VERSION: ${{ inputs.version }}
+        CHANNEL: ${{ inputs.channel }}
+      run: |
+        import json, os, pathlib
+        key     = os.environ["KEY"]
+        version = os.environ["VERSION"]
+        channel = os.environ["CHANNEL"]
+        p = pathlib.Path(f"/tmp/version-repo-push/data/{channel}.json")
+        d = json.loads(p.read_text())
+        parts = key.split(".")
+        node = d
+        for part in parts[:-1]:
+            node = node[part]
+        leaf = parts[-1]
+        if leaf == "*" or leaf == parts[0]:
+            # "apexos" means stamp all keys under the apexos object
+            obj = d[parts[0]] if len(parts) == 1 else node
+            for k in obj:
+                obj[k] = version
+        else:
+            node[leaf] = version
+        p.write_text(json.dumps(d, indent=2, ensure_ascii=False) + "
+")
+        print(f"Updated {channel}.json: {key} -> {version}")
+
+    - name: Commit and push
+      shell: bash
+      env:
+        KEY: ${{ inputs.key }}
+        VERSION: ${{ inputs.version }}
+        CHANNEL: ${{ inputs.channel }}
+      run: |
+        cd /tmp/version-repo-push
+        git add data/"${CHANNEL}".json
+        if git diff --cached --quiet; then
+          echo "No change needed — ${CHANNEL} already at ${VERSION}"
+        else
+          git commit -m "Bump ${KEY} to ${VERSION} on ${CHANNEL}"
+          git push
+          echo "Pushed bump: ${KEY}=${VERSION} on ${CHANNEL}"
+        fi
+
+    - name: Cascade to beta (stable only)
+      if: inputs.cascade_to_beta == 'true'
+      shell: python3 {0}
+      env:
+        KEY: ${{ inputs.key }}
+        VERSION: ${{ inputs.version }}
+      run: |
+        import json, os, pathlib
+        key     = os.environ["KEY"]
+        version = os.environ["VERSION"]
+        p = pathlib.Path("/tmp/version-repo-push/data/beta.json")
+        d = json.loads(p.read_text())
+        parts = key.split(".")
+        node = d
+        for part in parts[:-1]:
+            node = node[part]
+        leaf = parts[-1]
+        if leaf == "*" or leaf == parts[0]:
+            obj = d[parts[0]] if len(parts) == 1 else node
+            for k in obj:
+                obj[k] = version
+        else:
+            node[leaf] = version
+        p.write_text(json.dumps(d, indent=2, ensure_ascii=False) + "
+")
+        print(f"Cascaded to beta: {key} -> {version}")
+
+    - name: Commit and push cascade
+      if: inputs.cascade_to_beta == 'true'
+      shell: bash
+      env:
+        KEY: ${{ inputs.key }}
+        VERSION: ${{ inputs.version }}
+      run: |
+        cd /tmp/version-repo-push
+        git add data/beta.json
+        if ! git diff --cached --quiet; then
+          git commit -m "Cascade ${KEY}=${VERSION} from stable to beta"
+          git push
+          echo "Cascaded to beta"
+        fi
+
+    - name: Cleanup SSH key
+      if: always()
+      shell: bash
+      run: |
+        rm -f "${HOME}/.ssh/version-push-deploy-key"
+        echo "Deploy key removed from runner disk"

@@ -43,6 +43,17 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Create scratch clone directory
+      shell: bash
+      run: |
+        # A fixed path collides across concurrent jobs from different repos
+        # sharing a runner (this action is invoked by core/supervisor/every
+        # plugin, often in parallel, on a small self-hosted pool) — a real
+        # "destination path already exists" failure hit repeatedly before
+        # every inlined copy of this logic was fixed the same way. mktemp -d
+        # is unique per invocation; $GITHUB_ENV carries it to later steps.
+        echo "VERSION_REPO_DIR=$(mktemp -d)" >> "$GITHUB_ENV"
+
     - name: Configure SSH deploy key
       shell: bash
       env:
@@ -51,8 +62,7 @@ runs:
         SSHDIR="${HOME}/.ssh"
         mkdir -p "$SSHDIR" && chmod 700 "$SSHDIR"
         KEYFILE="${SSHDIR}/version-push-deploy-key"
-        printf '%s
-' "$DEPLOY_KEY" > "$KEYFILE"
+        printf '%s\n' "$DEPLOY_KEY" > "$KEYFILE"
         chmod 600 "$KEYFILE"
         # Override the github.com host entry so only this key is offered.
         # Using a host alias avoids clobbering any existing github.com entry
@@ -73,8 +83,8 @@ runs:
         VERSION_REPO: ${{ inputs.version_repo }}
       run: |
         CLONE_URL="git@version-repo-github:${VERSION_REPO}.git"
-        git clone --quiet --depth 1 "$CLONE_URL" /tmp/version-repo-push
-        cd /tmp/version-repo-push
+        git clone --quiet --depth 1 "$CLONE_URL" "$VERSION_REPO_DIR"
+        cd "$VERSION_REPO_DIR"
         git config user.name "${{ inputs.committer_name }}"
         git config user.email "${{ inputs.committer_email }}"
         echo "Cloned ${VERSION_REPO}"
@@ -90,7 +100,7 @@ runs:
         key     = os.environ["KEY"]
         version = os.environ["VERSION"]
         channel = os.environ["CHANNEL"]
-        p = pathlib.Path(f"/tmp/version-repo-push/data/{channel}.json")
+        p = pathlib.Path(os.environ["VERSION_REPO_DIR"]) / "data" / f"{channel}.json"
         d = json.loads(p.read_text())
         parts = key.split(".")
         node = d
@@ -104,8 +114,7 @@ runs:
                 obj[k] = version
         else:
             node[leaf] = version
-        p.write_text(json.dumps(d, indent=2, ensure_ascii=False) + "
-")
+        p.write_text(json.dumps(d, indent=2, ensure_ascii=False) + "\n")
         print(f"Updated {channel}.json: {key} -> {version}")
 
     - name: Commit and push
@@ -115,7 +124,7 @@ runs:
         VERSION: ${{ inputs.version }}
         CHANNEL: ${{ inputs.channel }}
       run: |
-        cd /tmp/version-repo-push
+        cd "$VERSION_REPO_DIR"
         git add data/"${CHANNEL}".json
         if git diff --cached --quiet; then
           echo "No change needed — ${CHANNEL} already at ${VERSION}"
@@ -135,7 +144,7 @@ runs:
         import json, os, pathlib
         key     = os.environ["KEY"]
         version = os.environ["VERSION"]
-        p = pathlib.Path("/tmp/version-repo-push/data/beta.json")
+        p = pathlib.Path(os.environ["VERSION_REPO_DIR"]) / "data" / "beta.json"
         d = json.loads(p.read_text())
         parts = key.split(".")
         node = d
@@ -148,8 +157,7 @@ runs:
                 obj[k] = version
         else:
             node[leaf] = version
-        p.write_text(json.dumps(d, indent=2, ensure_ascii=False) + "
-")
+        p.write_text(json.dumps(d, indent=2, ensure_ascii=False) + "\n")
         print(f"Cascaded to beta: {key} -> {version}")
 
     - name: Commit and push cascade
@@ -159,7 +167,7 @@ runs:
         KEY: ${{ inputs.key }}
         VERSION: ${{ inputs.version }}
       run: |
-        cd /tmp/version-repo-push
+        cd "$VERSION_REPO_DIR"
         git add data/beta.json
         if ! git diff --cached --quiet; then
           git commit -m "Cascade ${KEY}=${VERSION} from stable to beta"

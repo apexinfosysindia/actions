@@ -25,7 +25,7 @@ inputs:
   deploy_key:
     description: >
       SSH private key with write access to the version repo.
-      Pass ${{ secrets.VERSION_PUSH_KEY }}.
+      Pass the calling workflow's VERSION_PUSH_KEY secret.
     required: true
   version_repo:
     description: "GitHub repo (owner/name) for the version file store."

@@ -107,11 +107,17 @@ runs:
         for part in parts[:-1]:
             node = node[part]
         leaf = parts[-1]
-        if leaf == "*" or leaf == parts[0]:
-            # "apexos" means stamp all keys under the apexos object
-            obj = d[parts[0]] if len(parts) == 1 else node
-            for k in obj:
-                obj[k] = version
+        # A bare key ("apexos") whose value is an OBJECT means stamp every
+        # machine key under it; a bare key whose value is a plain string
+        # ("cli", "supervisor") just gets set directly. `leaf == parts[0]`
+        # alone is wrong here — for ANY single-part key leaf trivially
+        # equals parts[0], so it fired for flat string keys too and tried
+        # to iterate a str as a dict ('str' object does not support item
+        # assignment) — broke on the very first real plugin dev-bump after
+        # this action went public.
+        if isinstance(node[leaf], dict):
+            for k in node[leaf]:
+                node[leaf][k] = version
         else:
             node[leaf] = version
         p.write_text(json.dumps(d, indent=2, ensure_ascii=False) + "\n")
@@ -151,10 +157,9 @@ runs:
         for part in parts[:-1]:
             node = node[part]
         leaf = parts[-1]
-        if leaf == "*" or leaf == parts[0]:
-            obj = d[parts[0]] if len(parts) == 1 else node
-            for k in obj:
-                obj[k] = version
+        if isinstance(node[leaf], dict):
+            for k in node[leaf]:
+                node[leaf][k] = version
         else:
             node[leaf] = version
         p.write_text(json.dumps(d, indent=2, ensure_ascii=False) + "\n")
